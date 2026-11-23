@@ -111,6 +111,101 @@ run "resource_policy_denies_other_endpoints" {
     condition     = jsondecode(aws_api_gateway_rest_api_policy.this.policy).Statement[0].Resource == "arn:aws:execute-api:eu-west-2:123456789012:abc123defg/*"
     error_message = "policy must be scoped to this API"
   }
+
+  assert {
+    condition     = jsondecode(aws_vpc_endpoint_policy.execute_api.policy).Statement[0].Resource == "arn:aws:execute-api:eu-west-2:123456789012:abc123defg/*"
+    error_message = "endpoint policy must allow only this API"
+  }
+
+  assert {
+    condition     = length(jsondecode(aws_vpc_endpoint_policy.execute_api.policy).Statement) == 1 && aws_vpc_endpoint_policy.execute_api.vpc_endpoint_id == "vpce-0123456789abcdef0"
+    error_message = "endpoint policy must be one Allow statement on the module's endpoint"
+  }
+}
+
+# The guard on its own: a policy must deny every endpoint except ours.
+run "guard_accepts_policy_with_endpoint_condition" {
+  command = plan
+
+  module {
+    source = "./modules/policy-guard"
+  }
+
+  variables {
+    vpc_endpoint_id = "vpce-0123456789abcdef0"
+    policy_json = jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        { Effect = "Allow", Principal = "*", Action = "execute-api:Invoke", Resource = "arn:aws:execute-api:eu-west-2:123456789012:abc123defg/*" },
+        { Effect = "Deny", Principal = "*", Action = "execute-api:Invoke", Resource = "arn:aws:execute-api:eu-west-2:123456789012:abc123defg/*", Condition = { StringNotEquals = { "aws:SourceVpce" = "vpce-0123456789abcdef0" } } },
+      ]
+    })
+  }
+
+  assert {
+    condition     = output.policy_json == var.policy_json
+    error_message = "guard must pass the policy through unchanged"
+  }
+}
+
+run "guard_rejects_policy_without_endpoint_condition" {
+  command = plan
+
+  module {
+    source = "./modules/policy-guard"
+  }
+
+  variables {
+    vpc_endpoint_id = "vpce-0123456789abcdef0"
+    policy_json = jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        { Effect = "Allow", Principal = "*", Action = "execute-api:Invoke", Resource = "arn:aws:execute-api:eu-west-2:123456789012:abc123defg/*" },
+      ]
+    })
+  }
+
+  expect_failures = [var.policy_json]
+}
+
+run "guard_rejects_source_vpc_instead_of_endpoint" {
+  command = plan
+
+  module {
+    source = "./modules/policy-guard"
+  }
+
+  variables {
+    vpc_endpoint_id = "vpce-0123456789abcdef0"
+    policy_json = jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        { Effect = "Deny", Principal = "*", Action = "execute-api:Invoke", Resource = "*", Condition = { StringNotEquals = { "aws:SourceVpc" = "vpc-0aaaaaaaaaaaaaaa1" } } },
+      ]
+    })
+  }
+
+  expect_failures = [var.policy_json]
+}
+
+run "guard_rejects_other_endpoint" {
+  command = plan
+
+  module {
+    source = "./modules/policy-guard"
+  }
+
+  variables {
+    vpc_endpoint_id = "vpce-0123456789abcdef0"
+    policy_json = jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        { Effect = "Deny", Principal = "*", Action = "execute-api:Invoke", Resource = "*", Condition = { StringNotEquals = { "aws:SourceVpce" = "vpce-0fffffffffffffff0" } } },
+      ]
+    })
+  }
+
+  expect_failures = [var.policy_json]
 }
 
 run "open_world_cidr_rejected" {
@@ -121,6 +216,39 @@ run "open_world_cidr_rejected" {
   }
 
   expect_failures = [var.allowed_cidrs]
+}
+
+run "split_open_world_cidr_rejected" {
+  command = plan
+
+  variables {
+    allowed_cidrs = ["0.0.0.0/1", "128.0.0.0/1"]
+  }
+
+  expect_failures = [var.allowed_cidrs]
+}
+
+run "public_cidr_rejected" {
+  command = plan
+
+  variables {
+    allowed_cidrs = ["10.0.0.0/8", "203.0.113.0/24"]
+  }
+
+  expect_failures = [var.allowed_cidrs]
+}
+
+run "private_and_shared_ranges_accepted" {
+  command = plan
+
+  variables {
+    allowed_cidrs = ["172.16.5.0/24", "192.168.0.0/16", "100.64.0.0/16"]
+  }
+
+  assert {
+    condition     = length(aws_vpc_security_group_ingress_rule.endpoint_https) == 3
+    error_message = "one 443 rule per allowed CIDR expected"
+  }
 }
 
 run "empty_subnets_rejected" {

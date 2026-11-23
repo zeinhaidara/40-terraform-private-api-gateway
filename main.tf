@@ -89,9 +89,11 @@ resource "aws_api_gateway_rest_api" "this" {
 }
 
 # Only calls that arrive through our endpoint are allowed.
-resource "aws_api_gateway_rest_api_policy" "this" {
-  rest_api_id = aws_api_gateway_rest_api.this.id
-  policy = jsonencode({
+module "policy_guard" {
+  source = "./modules/policy-guard"
+
+  vpc_endpoint_id = aws_vpc_endpoint.execute_api.id
+  policy_json = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
@@ -108,6 +110,28 @@ resource "aws_api_gateway_rest_api_policy" "this" {
         Condition = {
           StringNotEquals = { "aws:SourceVpce" = aws_vpc_endpoint.execute_api.id }
         }
+      },
+    ]
+  })
+}
+
+resource "aws_api_gateway_rest_api_policy" "this" {
+  rest_api_id = aws_api_gateway_rest_api.this.id
+  policy      = module.policy_guard.policy_json
+}
+
+# The endpoint can only be used to call this API, not any API in any account.
+# Separate resource, because the API already depends on the endpoint.
+resource "aws_vpc_endpoint_policy" "execute_api" {
+  vpc_endpoint_id = aws_vpc_endpoint.execute_api.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect    = "Allow"
+        Principal = "*"
+        Action    = "execute-api:Invoke"
+        Resource  = "${aws_api_gateway_rest_api.this.execution_arn}/*"
       },
     ]
   })

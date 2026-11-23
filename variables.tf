@@ -37,10 +37,19 @@ variable "allowed_cidrs" {
     error_message = "allowed_cidrs must list at least one valid CIDR."
   }
 
-  # A private API open to the whole internet range defeats the point.
+  # A private API reachable from public ranges defeats the point.
   validation {
-    condition     = !contains(var.allowed_cidrs, "0.0.0.0/0")
-    error_message = "allowed_cidrs must not contain 0.0.0.0/0."
+    condition = alltrue([
+      for c in var.allowed_cidrs : anytrue([
+        for base in ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"] :
+        try(
+          tonumber(split("/", c)[1]) >= tonumber(split("/", base)[1])
+          && cidrhost("${split("/", c)[0]}/${split("/", base)[1]}", 0) == cidrhost(base, 0),
+          false
+        )
+      ])
+    ])
+    error_message = "allowed_cidrs must sit inside 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 or 100.64.0.0/10."
   }
 }
 

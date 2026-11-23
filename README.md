@@ -6,10 +6,13 @@ through an `execute-api` interface endpoint; API Gateway reaches the
 service through a VPC link to an internal Network Load Balancer. Nothing is
 reachable from the internet.
 
-> **Status:** `terraform validate` and 7 `terraform test` runs against a
+> **Status:** `terraform validate` and 14 `terraform test` runs against a
 > mocked AWS provider: two apply-with-mocks runs that check the wiring
 > (private endpoint type, endpoint binding, VPC link to NLB, integration
-> URI, resource policy) and five rejected inputs. **Nothing has been
+> URI, resource policy, endpoint policy), four runs of the policy guard
+> (one accepted policy; a policy with no endpoint condition, one using
+> `aws:SourceVpc`, and one naming another endpoint are all rejected), one
+> accepted set of private CIDRs, and seven rejected inputs. **Nothing has been
 > planned or applied against AWS**, so real API Gateway behaviour (private
 > DNS resolution, VPC link provisioning time, deployment ordering) is
 > untested.
@@ -20,6 +23,11 @@ reachable from the internet.
 > API Gateway + VPC Link + NLB for internal microservices.
 
 Terraform was chosen; CloudFormation and Bicep versions are not provided.
+
+Why it matters: internal services often get a public API Gateway endpoint
+because it is the default, and then rely on auth alone. A private API, an
+endpoint policy and a resource policy that only accept calls from one VPC
+endpoint take the internet out of the path entirely.
 
 ## Which API Gateway flavour, and why
 
@@ -43,7 +51,7 @@ your provider version before switching.
 
 ```mermaid
 flowchart LR
-    C[client in VPC<br/>10.0.0.0/8] -->|HTTPS 443<br/>private DNS| E[execute-api<br/>interface endpoint<br/>SG: 443 from allowed_cidrs]
+    C[client in VPC<br/>10.0.0.0/8] -->|HTTPS 443<br/>private DNS| E[execute-api<br/>interface endpoint<br/>SG: 443 from allowed_cidrs<br/>endpoint policy: this API only]
     E --> API[Private REST API<br/>resource policy:<br/>deny unless aws:SourceVpce = this endpoint]
     API -->|ANY /proxy+<br/>HTTP_PROXY| VL[VPC link]
     VL --> NLB[internal NLB<br/>TCP :80]
@@ -73,7 +81,7 @@ module "orders_api" {
 | `name` | required | 2-25 chars; NLB and target group names derive from it |
 | `vpc_id` | required | |
 | `subnet_ids` | required | private subnets for the NLB and the endpoint |
-| `allowed_cidrs` | required | who may reach the endpoint on 443; `0.0.0.0/0` is rejected |
+| `allowed_cidrs` | required | who may reach the endpoint on 443; must be inside private ranges |
 | `service_port` | `8080` | port on the targets |
 | `target_ips` | `[]` | optional IP targets; or register targets yourself via `nlb_target_group_arn` |
 | `stage_name` | `v1` | |
@@ -119,10 +127,17 @@ parses Terraform output.
 ## Security notes
 
 - No internet path: private API, internal NLB, interface endpoint.
-- Two independent checks: the endpoint security group (who can reach the
-  endpoint) and the resource policy `Deny` on `aws:SourceVpce` (which
-  endpoint can call the API).
-- `0.0.0.0/0` is rejected in `allowed_cidrs`.
+- Three independent checks: the endpoint security group (who can reach the
+  endpoint), the endpoint policy (the endpoint can only invoke this API, not
+  any API in any account), and the resource policy `Deny` on
+  `aws:SourceVpce` (which endpoint can call the API).
+- The resource policy goes through `modules/policy-guard`, which fails the
+  plan if the policy has no `Deny` on `execute-api:Invoke` for every
+  endpoint except the module's own. Tests feed it bad policies directly.
+- `allowed_cidrs` must sit inside private ranges (`10.0.0.0/8`,
+  `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`); `0.0.0.0/0`, split
+  ranges such as `0.0.0.0/1`, and public ranges are rejected. The security
+  group has no egress rules.
 - No credentials, state, or backend in the repo; IDs are placeholders.
 
 ## Idempotency
